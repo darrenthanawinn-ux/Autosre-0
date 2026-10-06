@@ -1,0 +1,20 @@
+# Agent definitions for the GitLab Duo Agent Platform.
+# Each file declares one swarm member: its role, trigger, MCP tools and guardrails.
+# The reference implementation of every agent is in autosre/agents/*.py; these manifests are the
+# declarative contract. Adapt field names to the current Duo custom agent / flow schema when registering
+# them in your project's AI Catalog.
+name: autosre-code-agent
+description: Turns an issue labelled `autosre` into a tested merge request that auto-merges on green.
+stage: [plan, create]
+trigger:
+  event: issue.labeled
+  label: autosre
+model: claude-sonnet-5-5
+mcp_servers: [autosre-gitlab]
+allowed_tools: [get_issue, list_files, read_file, create_branch, commit_files, create_merge_request, auto_merge]
+guardrails:
+  protected_paths: [".gitlab-ci.yml", "autosre/", "deploy/", "LICENSE", "policy.yaml"]
+  must_include_tests: true
+handoff:
+  on_success: pipeline (verify -> secure)
+  state_key: "issue:{iid}"

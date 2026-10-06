@@ -1,0 +1,16 @@
+name: autosre-security-agent
+description: Scans (SAST + dependency audit), auto-patches findings, and enforces governance policy.
+stage: [secure]
+trigger:
+  event: pipeline.stage
+  stage: secure
+model: claude-sonnet-5-5
+mcp_servers: [autosre-gitlab]
+allowed_tools: [commit_files]
+policy: ../policy.yaml
+guardrails:
+  dependency_bumps: deterministic   # versions come from pip-audit, never from the LLM
+  block_on_severity: [HIGH]
+handoff:
+  on_patch: new commit retriggers pipeline
+  on_unresolved_high: fail job (merge blocked)

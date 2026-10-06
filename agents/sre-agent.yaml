@@ -1,0 +1,12 @@
+name: autosre-sre-agent
+description: Canary-deploys to Cloud Run, promotes on healthy canary, watches SLOs and rolls back automatically.
+stage: [package, release, configure, monitor]
+trigger:
+  event: pipeline.main
+model: claude-sonnet-5-5
+mcp_servers: [autosre-gitlab, autosre-gcp]
+allowed_tools: [deploy_cloud_run, health_check, promote, service_url, error_count, previous_revision, rollback, create_issue]
+slo:
+  max_errors_per_5m: 5
+  healthcheck_path: /healthz
+on_breach: [rollback, create_incident_issue]

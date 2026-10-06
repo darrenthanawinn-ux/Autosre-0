@@ -1,0 +1,128 @@
+stages: [plan, verify, secure, package, release, configure, monitor, heal]
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "trigger" || $CI_PIPELINE_SOURCE == "api"
+    - if: $CI_COMMIT_BRANCH =~ /^autosre\//
+
+variables:
+  REGISTRY: ${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/autosre
+  IMAGE: ${REGISTRY}/app:${CI_COMMIT_SHORT_SHA}
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+default:
+  image: python:3.12-slim
+  cache:
+    paths: [.cache/pip]
+  before_script:
+    - pip install -q -r requirements.txt
+
+# Built-in GitLab scanners complement the agent-driven patching below.
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+# ── 1. PLAN ── issue labelled `autosre` -> Code Agent writes the MR (webhook or trigger API).
+plan:issue-to-mr:
+  stage: plan
+  rules:
+    - if: $AUTOSRE_ISSUE_IID && ($CI_PIPELINE_SOURCE == "trigger" || $CI_PIPELINE_SOURCE == "api")
+  script:
+    - python -m autosre.orchestrator plan --issue "$AUTOSRE_ISSUE_IID"
+
+# ── 2. VERIFY ── tests; failures feed the healing loop.
+verify:test:
+  stage: verify
+  rules:
+    - if: $AUTOSRE_ISSUE_IID == null || $AUTOSRE_ISSUE_IID == ""
+  script:
+    - pip install -q -r app/requirements.txt
+    - pytest -q --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+
+# ── 3. SECURE ── agent scans, patches vulnerable deps / code, enforces governance policy.
+secure:agent:
+  stage: secure
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH =~ /^autosre\//
+  script:
+    - python -m autosre.orchestrator secure --branch "${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-$CI_COMMIT_REF_NAME}"
+
+# ── 4. PACKAGE ── container build + push to Artifact Registry (main only).
+package:image:
+  stage: package
+  image: google/cloud-sdk:slim
+  services: [docker:27-dind]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq docker.io >/dev/null
+    - gcloud auth activate-service-account --key-file="$GCP_SA_KEY"
+    - gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+  script:
+    - docker build -t "$IMAGE" -t "${REGISTRY}/app:latest" .
+    - docker push "$IMAGE"
+    - docker push "${REGISTRY}/app:latest"
+
+# ── 5. RELEASE ── tagged GitLab release with auto-generated notes.
+release:tag:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script: []
+  script:
+    - echo "Releasing v0.${CI_PIPELINE_IID}"
+  release:
+    tag_name: "v0.${CI_PIPELINE_IID}"
+    description: "Autonomous release from commit ${CI_COMMIT_SHORT_SHA} (image ${IMAGE})."
+    ref: $CI_COMMIT_SHA
+
+# ── 6. CONFIGURE ── render the Cloud Run manifest, canary deploy, verify, promote.
+configure:deploy:
+  stage: configure
+  image: google/cloud-sdk:slim
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq python3-pip gettext-base >/dev/null
+    - pip install -q --break-system-packages -r requirements.txt
+    - gcloud auth activate-service-account --key-file="$GCP_SA_KEY"
+    - export CLOUD_RUN_SERVICE=${CLOUD_RUN_SERVICE:-autosre-demo}
+  script:
+    - envsubst < deploy/cloudrun.yaml > rendered-cloudrun.yaml
+    - python3 -m autosre.orchestrator deploy --image "$IMAGE"
+  artifacts:
+    paths: [rendered-cloudrun.yaml]
+
+# ── 7. MONITOR ── SRE agent watches live traffic and rolls back on SLO breach.
+monitor:slo:
+  stage: monitor
+  image: google/cloud-sdk:slim
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq python3-pip >/dev/null
+    - pip install -q --break-system-packages -r requirements.txt
+    - gcloud auth activate-service-account --key-file="$GCP_SA_KEY"
+  script:
+    - python3 -m autosre.orchestrator monitor
+
+# ── 8. HEAL ── runs only when something above failed: diagnose, patch, push, re-trigger.
+heal:
+  stage: heal
+  when: on_failure
+  rules:
+    - if: $CI_COMMIT_BRANCH || $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+      when: on_failure
+  script:
+    - python -m autosre.orchestrator heal --pipeline "$CI_PIPELINE_ID" --branch "${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-$CI_COMMIT_REF_NAME}"
+  allow_failure: true

@@ -1,0 +1,8 @@
+# Governance policy enforced by the Security & Governance Agent
+block_on_severity: [HIGH]
+auto_patch: [dependencies, sast]
+protected_paths: [".gitlab-ci.yml", "autosre/", "deploy/", "LICENSE"]
+max_heal_attempts: 3
+slo:
+  max_errors_per_5m: 5
+  healthcheck_path: /healthz

@@ -1,0 +1,12 @@
+name: autosre-healing-agent
+description: Reads failed job logs, classifies the failure, pushes a fix or retries transient jobs.
+stage: [verify]
+trigger:
+  event: pipeline.failed
+model: claude-sonnet-5-5
+mcp_servers: [autosre-gitlab]
+allowed_tools: [get_failed_jobs, read_file, commit_files, retry_job, create_issue]
+guardrails:
+  max_attempts: 3
+  on_budget_exhausted: open incident issue
+  protected_paths: [".gitlab-ci.yml", "autosre/", "deploy/"]
